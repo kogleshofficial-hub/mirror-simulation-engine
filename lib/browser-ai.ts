@@ -25,15 +25,19 @@ Rules:
 - If information is missing, make the smallest defensible assumption and disclose it.
 - Return JSON only. No markdown. No explanation outside JSON.`
 
+async function loadPipeline(pipeline: (task: 'text-generation', model: string, options?: Record<string, unknown>) => Promise<unknown>): Promise<Generator> {
+  try {
+    const pipe = await pipeline('text-generation', MODEL_ID, { dtype: 'q4', device: 'webgpu' }) as (messages: unknown, options?: unknown) => Promise<unknown>
+    return (messages, options) => pipe(messages, options)
+  } catch {
+    const pipe = await pipeline('text-generation', MODEL_ID, { dtype: 'q4' }) as (messages: unknown, options?: unknown) => Promise<unknown>
+    return (messages, options) => pipe(messages, options)
+  }
+}
+
 async function getGenerator(): Promise<Generator> {
   if (!generatorPromise) {
-    generatorPromise = import('@huggingface/transformers').then(async ({ pipeline }) => {
-      const pipe = await pipeline('text-generation', MODEL_ID, {
-        dtype: 'q4',
-        device: 'webgpu',
-      })
-      return (messages, options) => pipe(messages, options as never) as Promise<unknown>
-    })
+    generatorPromise = import('@huggingface/transformers').then(({ pipeline }) => loadPipeline(pipeline as never))
   }
   return generatorPromise
 }
