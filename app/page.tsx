@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { parseScenario } from '../lib/engine'
+import { compileWithLocalAI, localAIModelId } from '../lib/browser-ai'
 import { simulate, summarize, type SimulationState } from '../lib/simulation'
-import { validateSimulationModel, type SimulationModel } from '../lib/model'
+import type { SimulationModel } from '../lib/model'
 
 const demo = 'I am launching a small online store. I expect around 500 orders over 2 days, have 3 developers helping with the workflow, and one developer may become unavailable halfway through. Show me what happens to the workload.'
 const fmt = (n: number) => new Intl.NumberFormat('en-US').format(Math.round(n))
@@ -11,7 +12,17 @@ const clock = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${S
 
 function localModel(text: string): SimulationModel {
   const m = parseScenario(text)
-  return { mode: 'flow', title: `${m.subjectCount} ${m.subjectLabel} simulation`, subject: { label: m.subjectLabel, count: m.subjectCount }, resources: [{ label: m.resourceLabel, count: m.resourceCount, capacityPerMinute: m.capacityPerResource }], durationMinutes: m.durationMinutes, profile: m.profile, events: m.lossAt == null ? [] : [{ minute: m.lossAt, type: 'remove_resource', amount: m.lossAmount || 1, target: 'resource', label: `${m.lossAmount || 1} ${m.resourceLabel} unavailable` }], assumptions: ['Local deterministic parser used.'], limitations: ['Complex natural-language relationships may not be represented without AI interpretation.'] }
+  return {
+    mode: 'flow',
+    title: `${m.subjectCount} ${m.subjectLabel} simulation`,
+    subject: { label: m.subjectLabel, count: m.subjectCount },
+    resources: [{ label: m.resourceLabel, count: m.resourceCount, capacityPerMinute: m.capacityPerResource }],
+    durationMinutes: m.durationMinutes,
+    profile: m.profile,
+    events: m.lossAt == null ? [] : [{ minute: m.lossAt, type: 'remove_resource', amount: m.lossAmount || 1, target: 'resource', label: `${m.lossAmount || 1} ${m.resourceLabel} unavailable` }],
+    assumptions: ['Local deterministic parser used because the on-device AI model was unavailable.'],
+    limitations: ['Complex natural-language relationships may not be represented by the fallback parser.'],
+  }
 }
 
 function Chart({ states, minute }: { states: SimulationState[]; minute: number }) {
@@ -22,46 +33,93 @@ function Chart({ states, minute }: { states: SimulationState[]; minute: number }
 }
 
 export default function Home() {
-  const [text, setText] = useState(demo), [model, setModel] = useState<SimulationModel>(() => localModel(demo)), [whatIf, setWhatIf] = useState(''), [minute, setMinute] = useState(0), [running, setRunning] = useState(false), [busy, setBusy] = useState(false), [source, setSource] = useState('deterministic fallback'), [error, setError] = useState(''), [note, setNote] = useState('')
-  const states = useMemo(() => simulate(model), [model]), summary = useMemo(() => summarize(model), [model]), state = minute === 0 ? { minute: 0, demand: 0, completed: 0, queue: 0, capacityPerMinute: model.resources.reduce((a, r) => a + r.count * r.capacityPerMinute, 0), resources: model.resources.reduce((a, r) => a + r.count, 0), utilization: 0, activeEvents: [] as string[] } : states[Math.min(minute, states.length) - 1]
-  const pct = Math.min(100, minute / Math.max(1, model.durationMinutes) * 100), event = model.events.find(e => e.minute === minute)
+  const [baseText, setBaseText] = useState(demo)
+  const [text, setText] = useState(demo)
+  const [model, setModel] = useState<SimulationModel>(() => localModel(demo))
+  const [whatIf, setWhatIf] = useState('')
+  const [minute, setMinute] = useState(0)
+  const [running, setRunning] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [source, setSource] = useState('local AI ready')
+  const [error, setError] = useState('')
+  const [note, setNote] = useState('')
+  const states = useMemo(() => simulate(model), [model])
+  const summary = useMemo(() => summarize(model), [model])
+  const state = minute === 0
+    ? { minute: 0, demand: 0, completed: 0, queue: 0, capacityPerMinute: model.resources.reduce((a, r) => a + r.count * r.capacityPerMinute, 0), resources: model.resources.reduce((a, r) => a + r.count, 0), utilization: 0, activeEvents: [] as string[] }
+    : states[Math.min(minute, states.length) - 1]
+  const pct = Math.min(100, minute / Math.max(1, model.durationMinutes) * 100)
+  const event = model.events.find(e => e.minute === minute)
 
-  useEffect(() => { if (!running) return; const id = window.setInterval(() => setMinute(m => { if (m >= model.durationMinutes) { setRunning(false); return m } return m + 1 }), 35); return () => window.clearInterval(id) }, [running, model.durationMinutes])
+  useEffect(() => {
+    if (!running) return
+    const id = window.setInterval(() => setMinute(m => {
+      if (m >= model.durationMinutes) { setRunning(false); return m }
+      return m + 1
+    }), 35)
+    return () => window.clearInterval(id)
+  }, [running, model.durationMinutes])
 
   async function compile(input: string) {
-    const response = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: input }) })
-    const payload = await response.json()
-    const parsed = validateSimulationModel(payload.model)
-    if (!parsed) throw new Error('Invalid model returned')
-    setModel(parsed); setSource(payload.source === 'ai' ? 'AI interpreted' : 'deterministic fallback'); if (payload.warning) setNote(payload.warning)
+    try {
+      const parsed = await compileWithLocalAI(input)
+      setModel(parsed)
+      setSource('local AI · on-device')
+      setNote(`Running ${localAIModelId()} locally in your browser. No API key or cloud AI request is used.`)
+      return true
+    } catch (localError) {
+      console.warn('MIRROR local AI unavailable:', localError)
+      setModel(localModel(input))
+      setSource('deterministic fallback')
+      setNote('On-device AI was unavailable on this device, so MIRROR safely used its deterministic compiler. No API key was used.')
+      return false
+    }
   }
 
   async function run() {
     if (!text.trim()) return setError('Describe the situation you want MIRROR to test.')
-    setError(''); setNote(''); setBusy(true); setRunning(false); setMinute(0)
-    try { await compile(text) } catch { setModel(localModel(text)); setSource('deterministic fallback'); setNote('AI analysis was unavailable. MIRROR safely fell back to its local compiler.'); } finally { setBusy(false); setRunning(true) }
+    setError(''); setNote('Loading the on-device AI model if needed…'); setBusy(true); setRunning(false); setMinute(0)
+    try {
+      await compile(text)
+    } finally {
+      setBusy(false)
+      setRunning(true)
+    }
   }
 
   async function applyChange() {
     if (!whatIf.trim()) return
     setError(''); setNote(''); setBusy(true); setRunning(false); setMinute(0)
-    try { const combined = `${text}\n\nIMPORTANT SCENARIO CHANGE: ${whatIf}`; await compile(combined); setText(combined); setNote(`Applied: ${whatIf}`); setWhatIf('') } catch { setError('MIRROR could not safely interpret that change. Try a measurable change such as “increase orders to 1000” or “remove 1 worker”.') } finally { setBusy(false); setRunning(true) }
+    const changedScenario = `${baseText}\n\nSCENARIO CHANGE: ${whatIf}`
+    try {
+      await compile(changedScenario)
+      setText(changedScenario)
+      setNote(`Tested change: ${whatIf}`)
+      setWhatIf('')
+    } finally {
+      setBusy(false)
+      setRunning(true)
+    }
+  }
+
+  function reset() {
+    setBaseText(demo); setText(demo); setModel(localModel(demo)); setSource('local AI ready'); setRunning(false); setMinute(0); setWhatIf(''); setError(''); setNote('')
   }
 
   return <main className="shell">
-    <header className="top"><div className="brand"><div className="mark">M</div><strong>MIRROR</strong></div><div className="status"><i className="dot"/> {busy ? 'interpreting scenario' : running ? 'simulation running' : minute >= model.durationMinutes ? 'simulation complete' : 'engine ready'}</div></header>
-    <section className="hero"><div className="eyebrow">Natural language → deterministic simulation</div><h1>Test the decision<br/><span>before reality does.</span></h1><p>Describe a real situation in your own words. MIRROR extracts measurable parts, executes a deterministic model, and makes the consequences visible.</p><div className="domain-pills"><span>operations</span><span>projects</span><span>business</span><span>logistics</span><span>teams</span><span>systems</span></div></section>
+    <header className="top"><div className="brand"><div className="mark">M</div><strong>MIRROR</strong></div><div className="status"><i className="dot"/> {busy ? 'loading local AI' : running ? 'simulation running' : minute >= model.durationMinutes ? 'simulation complete' : 'engine ready'}</div></header>
+    <section className="hero"><div className="eyebrow">Natural language → local AI → deterministic simulation</div><h1>Test the decision<br/><span>before reality does.</span></h1><p>Describe a real situation in your own words. MIRROR interprets it locally on your device, turns it into a structured model, and makes the consequences visible.</p><div className="domain-pills"><span>operations</span><span>projects</span><span>business</span><span>logistics</span><span>teams</span><span>systems</span></div></section>
     <section className="workspace">
-      <aside className="panel input-panel"><div className="label">01 / Describe reality</div><textarea className="textarea" value={text} onChange={e => setText(e.target.value)} aria-label="Scenario description"/><div className="actions"><button className="primary" onClick={run} disabled={busy || running}>{busy ? 'Interpreting…' : running ? 'Running…' : 'Analyze & simulate'}</button><button className="secondary" onClick={() => { setRunning(false); setMinute(0); setError(''); setNote('') }}>Reset</button></div>{error && <div className="error">{error}</div>}<button className="demo" onClick={() => setText(demo)}><span>EXAMPLE</span><b>Online store workflow</b><small>500 orders · 3 developers · 2 days · one resource may disappear halfway</small></button><div className="extracted"><div className="label">02 / Model extracted</div><div className="chips"><span>{fmt(model.subject.count)} {model.subject.label}</span>{model.resources.slice(0, 3).map((r, i) => <span key={i}>{fmt(r.count)} {r.label}</span>)}<span>{model.resources.reduce((a, r) => a + r.count * r.capacityPerMinute, 0).toFixed(1)}/min capacity</span><span>{Math.round(model.durationMinutes / 60 * 10) / 10}h</span></div><div className="source-pill">{source}</div></div></aside>
-      <section className="panel sim"><div className="simhead"><div><div className="label">03 / Live simulation</div><div className="simtitle">{model.title}</div><div className="sub">AI interprets. MIRROR calculates. Every displayed state comes from the deterministic engine.</div></div><div className={`clock ${running ? 'live' : ''}`}><i/>{clock(minute)}<span>/ {clock(model.durationMinutes)}</span></div></div>
+      <aside className="panel input-panel"><div className="label">01 / Describe reality</div><textarea className="textarea" value={text} onChange={e => { setText(e.target.value); setBaseText(e.target.value) }} aria-label="Scenario description"/><div className="actions"><button className="primary" onClick={run} disabled={busy || running}>{busy ? 'Loading AI…' : running ? 'Running…' : 'Analyze & simulate'}</button><button className="secondary" onClick={reset}>Reset</button></div>{error && <div className="error">{error}</div>}<button className="demo" onClick={() => { setText(demo); setBaseText(demo) }}><span>EXAMPLE</span><b>Online store workflow</b><small>500 orders · 3 developers · 2 days · one resource may disappear halfway</small></button><div className="extracted"><div className="label">02 / Model extracted</div><div className="chips"><span>{fmt(model.subject.count)} {model.subject.label}</span>{model.resources.slice(0, 3).map((r, i) => <span key={i}>{fmt(r.count)} {r.label}</span>)}<span>{model.resources.reduce((a, r) => a + r.count * r.capacityPerMinute, 0).toFixed(1)}/min capacity</span><span>{Math.round(model.durationMinutes / 60 * 10) / 10}h</span></div><div className="source-pill">{source}</div></div></aside>
+      <section className="panel sim"><div className="simhead"><div><div className="label">03 / Live simulation</div><div className="simtitle">{model.title}</div><div className="sub">Local AI interprets. MIRROR calculates. Every displayed state comes from the deterministic engine.</div></div><div className={`clock ${running ? 'live' : ''}`}><i/>{clock(minute)}<span>/ {clock(model.durationMinutes)}</span></div></div>
         <div className="metrics"><div className={`metric ${state.queue > 0 ? 'attention' : ''}`}><span>Pressure</span><b>{fmt(state.queue)}</b><small>{model.subject.label} waiting</small></div><div className="metric"><span>Completed</span><b>{fmt(state.completed)}</b><small>of {fmt(model.subject.count)}</small></div><div className="metric"><span>Capacity</span><b>{fmt(state.capacityPerMinute)}<em>/min</em></b><small>available throughput</small></div><div className={`metric ${event ? 'attention' : ''}`}><span>Utilization</span><b>{state.utilization}%</b><small>{event ? event.label : 'current state'}</small></div></div>
         <div className="stage"><div className="stage-head"><span>LIVE SYSTEM STATE</span><span className={event ? 'danger' : ''}>{event ? `EVENT · ${clock(event.minute)}` : 'NORMAL OPERATION'}</span></div><div className="system"><div className="entity-block"><div className="entity-icon">{fmt(state.demand)}</div><strong>DEMAND</strong><small>{model.subject.label} arrived</small></div><div className="connector"><i/><i/><i/></div><div className={`entity-block queue-node ${state.queue > 0 ? 'hot' : ''}`}><div className="entity-icon">{fmt(state.queue)}</div><strong>PRESSURE</strong><small>{state.queue > 0 ? 'work accumulating' : 'system clear'}</small></div><div className="connector"><i/><i/><i/></div><div className="entity-block"><div className="staff-stack">{Array.from({length: Math.min(12, Math.max(1, Math.round(state.resources)))}, (_, i) => <i key={i} className={i < state.resources ? 'on' : 'off'}/>)}</div><strong>RESOURCES</strong><small>{fmt(state.resources)} active · {fmt(state.capacityPerMinute)}/min</small></div></div><div className="event-strip"><span className={minute > 0 ? 'passed' : ''}>01 <b>Demand</b>{model.profile === 'front-loaded' ? 'front-loaded' : 'steady'} profile</span>{model.events.slice(0, 2).map((e, i) => <span key={i} className={minute >= e.minute ? 'passed' : ''}>0{i + 2} <b>Event</b>{clock(e.minute)}</span>)}<span><b>Outcome</b>{summary.completionMinute >= model.durationMinutes ? 'window end' : clock(summary.completionMinute)}</span></div></div>
         <div className="progress"><span style={{width: `${pct}%`}}/></div><div className="insight"><div className="insight-kicker">WHAT THE MODEL FOUND</div><strong>{summary.peakQueue > 0 ? `${fmt(summary.peakQueue)} ${model.subject.label} accumulate at peak pressure.` : 'The modeled system keeps pace with demand.'}</strong><p>{summary.completionPercent < 100 ? `${summary.completionPercent}% of demand completes within the simulation window.` : `The modeled demand completes within ${clock(summary.completionMinute)}.`}</p></div>
-        <div className="change-box"><div><div className="label">04 / WHAT IF?</div><strong>Change the situation in your own words.</strong><small>MIRROR reinterprets the changed scenario instead of limiting you to fixed controls.</small></div><div className="change-row"><input value={whatIf} onChange={e => setWhatIf(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') applyChange() }} placeholder="e.g. two workers become unavailable during the rush" aria-label="What if change"/><button className="secondary" onClick={applyChange} disabled={busy}>Test change</button></div>{note && <div className="change-note">{note}</div>}</div>
+        <div className="change-box"><div><div className="label">04 / WHAT IF?</div><strong>Change the situation in your own words.</strong><small>MIRROR runs the changed scenario through the same local AI compiler and deterministic engine.</small></div><div className="change-row"><input value={whatIf} onChange={e => setWhatIf(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') applyChange() }} placeholder="e.g. two workers become unavailable during the rush" aria-label="What if change"/><button className="secondary" onClick={applyChange} disabled={busy}>Test change</button></div>{note && <div className="change-note">{note}</div>}</div>
       </section>
     </section>
     <section className="analysis"><div className="section-head"><div><div className="label">05 / Decision impact</div><h2>See the consequence, not just the number.</h2></div><span className="badge">DETERMINISTIC ENGINE</span></div><div className="analysis-grid"><div className="panel chart-card"><div className="card-title"><div><strong>System pressure</strong><small>Accumulated work over simulated time</small></div><b>{fmt(summary.peakQueue)} <span>peak</span></b></div><Chart states={states} minute={minute}/></div><div className="panel result-card"><div className="card-title"><div><strong>Outcome</strong><small>Computed from the current model</small></div></div><div className="compare"><div><span>COMPLETION</span><b>{summary.completionPercent}%</b><small>within window</small></div><div className="arrow">→</div><div><span>PEAK PRESSURE</span><b>{fmt(summary.peakQueue)}</b><small>waiting</small></div></div><div className="impact"><b>{summary.maxUtilization}%</b><span>maximum modeled utilization</span></div><div className="decision"><b>Decision signal</b><p>{summary.peakQueue > 0 ? `The model is capacity-constrained. Add ${model.resources[0]?.label || 'resources'}, increase throughput, or reduce demand during the peak.` : 'Capacity is sufficient under these assumptions. Stress-test it with more demand or fewer resources.'}</p></div></div></div></section>
-    <section className="model"><div className="label">06 / Model transparency</div><div className="modelgrid"><div className="modelcard"><h3>AI is the translator</h3><p>The language model extracts quantities, rates, time, events, assumptions, and limitations. It does not generate the simulation result.</p></div><div className="modelcard"><h3>Deterministic core</h3><p>Demand enters the system, capacity processes it, queues accumulate when demand exceeds capacity, and events alter future states.</p></div><div className="modelcard"><h3>Domain-neutral primitives</h3><p>Demand, resources, capacity, time, profiles, and events are not tied to registration, school events, or one industry.</p></div><div className="modelcard"><h3>Honest boundaries</h3><p>MIRROR is strongest for measurable flow and capacity problems. Specialized physics, finance, or scientific engines can be added rather than pretending one formula fits everything.</p></div>{model.assumptions.length > 0 && <div className="modelcard"><h3>Assumptions</h3><p>{model.assumptions.slice(0, 4).join(' · ')}</p></div>}{model.limitations.length > 0 && <div className="modelcard"><h3>Limitations</h3><p>{model.limitations.slice(0, 4).join(' · ')}</p></div>}</div></section>
+    <section className="model"><div className="label">06 / Model transparency</div><div className="modelgrid"><div className="modelcard"><h3>AI stays on the device</h3><p>The natural-language compiler runs in the visitor's browser. The model is downloaded and cached locally, so MIRROR does not need an OpenAI key or a per-user AI request.</p></div><div className="modelcard"><h3>Deterministic core</h3><p>Demand enters the system, capacity processes it, queues accumulate when demand exceeds capacity, and events alter future states.</p></div><div className="modelcard"><h3>Domain-neutral primitives</h3><p>Demand, resources, capacity, time, profiles, and events are not tied to registration, school events, or one industry.</p></div><div className="modelcard"><h3>Graceful fallback</h3><p>If a browser cannot run the local model, MIRROR rejects invalid AI output and falls back to its deterministic compiler instead of inventing a result.</p></div>{model.assumptions.length > 0 && <div className="modelcard"><h3>Assumptions</h3><p>{model.assumptions.slice(0, 4).join(' · ')}</p></div>}{model.limitations.length > 0 && <div className="modelcard"><h3>Limitations</h3><p>{model.limitations.slice(0, 4).join(' · ')}</p></div>}</div></section>
     <footer className="footer">MIRROR · Test the decision before reality does. · Built by <strong>Koglesh R. Murugan</strong></footer>
   </main>
 }
