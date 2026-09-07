@@ -15,12 +15,26 @@ function LineChart({ states, minute }: { states: State[]; minute: number }) {
   return <div className="chart-wrap"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Queue size over simulated time"><line x1={pad} x2={width-pad} y1={height-pad} y2={height-pad} className="axis"/><polyline points={points} className="chart-line"/><line x1={x} x2={x} y1={pad} y2={height-pad} className="cursor"/></svg><div className="chart-axis"><span>00:00</span><span>{clock(Math.round((states.length || 0) / 2))}</span><span>{clock(states.at(-1)?.minute ?? 0)}</span></div></div>
 }
 
+function applyWhatIf(model: Model, request: string): Model | null {
+  const value = request.match(/(?:to|=)\s*(\d[\d,]*)/i)?.[1]
+  if (!value) return null
+  const n = Math.max(0, Number(value.replace(/,/g, '')))
+  if (/attendees|students|people/i.test(request)) return { ...model, attendees: n }
+  if (/organizers|organizer|staff|workers|worker/i.test(request)) return { ...model, organizers: n }
+  if (/desks|counters|stations/i.test(request)) return { ...model, desks: n }
+  const hours = request.match(/(?:duration|event|run).*(?:to|=)\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)/i)
+  if (hours) return { ...model, durationMinutes: Math.max(30, Math.round(Number(hours[1]) * 60)) }
+  return null
+}
+
 export default function Home() {
   const [text, setText] = useState(demo)
   const [model, setModel] = useState<Model>(() => parseScenario(demo))
+  const [whatIf, setWhatIf] = useState('')
   const [minute, setMinute] = useState(0)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState('')
+  const [changeNote, setChangeNote] = useState('')
   const states = useMemo(() => simulate(model), [model])
   const summary = useMemo(() => summarize(model), [model])
   const baseline = useMemo(() => summarize({ ...model, lossAt: null }), [model])
@@ -41,9 +55,19 @@ export default function Home() {
   const run = () => {
     const m = parseScenario(text)
     if (m.attendees < 1 || m.organizers < 1 || m.desks < 1) { setError('MIRROR needs at least 1 attendee, organizer, and desk.'); return }
-    setError(''); setModel(m); setMinute(0); setRunning(true)
+    setError(''); setChangeNote(''); setModel(m); setMinute(0); setRunning(true)
   }
-  const reset = () => { setRunning(false); setMinute(0); setError('') }
+  const applyChange = () => {
+    const changed = applyWhatIf(model, whatIf)
+    if (!changed || changed.attendees < 1 || changed.organizers < 1 || changed.desks < 1) {
+      setError('Try a change like “increase attendees to 300” or “reduce organizers to 1”.')
+      return
+    }
+    setError(''); setRunning(false); setMinute(0); setModel(changed)
+    setText(`School event with ${changed.attendees} attendees, ${changed.organizers} organizers, ${changed.desks} registration desks, ${Math.round(changed.durationMinutes / 60)} hours.`)
+    setChangeNote(`Applied: ${whatIf.trim()}`); setWhatIf('')
+  }
+  const reset = () => { setRunning(false); setMinute(0); setError(''); setChangeNote('') }
 
   return <main className="shell">
     <header className="top"><div className="brand"><div className="mark">M</div><strong>MIRROR</strong></div><div className="status"><i className="dot"/> {running ? 'simulation running' : minute >= model.durationMinutes ? 'simulation complete' : 'engine ready'}</div></header>
@@ -68,6 +92,8 @@ export default function Home() {
 
         <div className="progress"><span style={{width: `${pct}%`}}/></div>
         <div className="insight"><div className="insight-kicker">THE CONSEQUENCE</div><strong>{summary.peakQueue > 0 ? `The disruption creates a peak queue of ${fmt(summary.peakQueue)}.` : 'The modeled system absorbs the arrival wave.'}</strong><p>{delay > 0 ? `With one organizer lost at ${clock(model.lossAt ?? 0)}, completion moves ${delay} simulated minutes later than the baseline.` : 'No completion delay appears under the current assumptions.'}</p></div>
+
+        <div className="change-box"><div><div className="label">WHAT IF?</div><strong>Change one condition and rerun the model.</strong><small>Try “increase attendees to 300”, “reduce organizers to 1”, or “increase desks to 4”.</small></div><div className="change-row"><input value={whatIf} onChange={e => setWhatIf(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') applyChange() }} placeholder="e.g. increase attendees to 300" aria-label="What if change"/><button className="secondary" onClick={applyChange}>Apply change</button></div>{changeNote && <div className="change-note">{changeNote} · Run simulation to watch the new state unfold.</div>}</div>
       </section>
     </section>
 
