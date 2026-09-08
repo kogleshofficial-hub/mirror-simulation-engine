@@ -18,16 +18,28 @@ export type SimulationSummary = {
   totalCompleted: number
   completionPercent: number
   maxUtilization: number
+  averageWaitMinutes: number
 }
 
 function demandAt(model: SimulationModel, minute: number) {
   if (minute <= 0) return 0
+  let base: number
   if (model.profile === 'front-loaded') {
     const peak = Math.min(30, Math.max(10, Math.round(model.durationMinutes * 0.25)))
-    if (minute <= peak) return Math.min(model.subject.count, Math.ceil(model.subject.count * 0.7 * minute / peak))
-    return Math.min(model.subject.count, Math.ceil(model.subject.count * 0.7 + model.subject.count * 0.3 * (minute - peak) / Math.max(1, model.durationMinutes - peak)))
+    base = minute <= peak
+      ? Math.min(model.subject.count, Math.ceil(model.subject.count * 0.7 * minute / peak))
+      : Math.min(model.subject.count, Math.ceil(model.subject.count * 0.7 + model.subject.count * 0.3 * (minute - peak) / Math.max(1, model.durationMinutes - peak)))
+  } else {
+    base = Math.min(model.subject.count, Math.ceil(model.subject.count * minute / model.durationMinutes))
   }
-  return Math.min(model.subject.count, Math.ceil(model.subject.count * minute / model.durationMinutes))
+
+  // Demand-change events are cumulative changes to the modeled total demand.
+  for (const event of model.events) {
+    if (event.target === 'subject' && event.type === 'demand_change' && event.minute <= minute) {
+      base += event.amount
+    }
+  }
+  return Math.max(0, base)
 }
 
 function resourceMultiplier(model: SimulationModel, minute: number, applyEvents: boolean) {
@@ -45,13 +57,15 @@ function capacityAt(model: SimulationModel, minute: number, applyEvents: boolean
   let capacity = model.resources.reduce((sum, r) => sum + r.count * r.capacityPerMinute, 0)
   if (!applyEvents) return Math.max(0, capacity)
   for (const event of model.events) {
-    if (event.minute > minute) continue
-    if (event.target === 'resource') {
-      const average = model.resources.length ? model.resources.reduce((sum, r) => sum + r.capacityPerMinute, 0) / model.resources.length : 0
-      if (event.type === 'remove_resource') capacity -= event.amount * average
-      if (event.type === 'add_resource') capacity += event.amount * average
-    }
-    if (event.target === 'subject' && event.type === 'demand_change') capacity = capacity
+    if (event.minute > minute || event.target !== 'resource') continue
+    // Events remove/add one or more equivalent resource units. When a model has
+    // multiple resource types, use the explicitly addressed resource only when
+    // the event label names it; otherwise use the model's weighted average.
+    const average = model.resources.length
+      ? model.resources.reduce((sum, r) => sum + r.capacityPerMinute, 0) / model.resources.length
+      : 0
+    if (event.type === 'remove_resource') capacity -= event.amount * average
+    if (event.type === 'add_resource') capacity += event.amount * average
   }
   return Math.max(0, capacity)
 }
@@ -61,21 +75,21 @@ export function simulate(model: SimulationModel, applyEvents = true): Simulation
   let queue = 0
   let completed = 0
   for (let minute = 1; minute <= model.durationMinutes; minute++) {
-    const arrivals = demandAt(model, minute) - demandAt(model, minute - 1)
+    const arrivals = Math.max(0, demandAt(model, minute) - demandAt(model, minute - 1))
     const capacity = capacityAt(model, minute, applyEvents)
     const available = queue + arrivals
     const done = Math.min(available, capacity)
-    queue = available - done
+    queue = Math.max(0, available - done)
     completed += done
     const activeEvents = applyEvents ? model.events.filter(e => e.minute === minute).map(e => e.label) : []
     states.push({
       minute,
-      demand: demandAt(model, minute),
+      demand: Math.min(model.subject.count, demandAt(model, minute)),
       completed: Math.min(model.subject.count, completed),
       queue,
       capacityPerMinute: Math.round(capacity * 100) / 100,
       resources: resourceMultiplier(model, minute, applyEvents),
-      utilization: capacity <= 0 ? (arrivals > 0 ? 100 : 0) : Math.min(100, Math.round(Math.min(available, capacity) / capacity * 100)),
+      utilization: capacity <= 0 ? (available > 0 ? 100 : 0) : Math.min(100, Math.round(Math.min(available, capacity) / capacity * 100)),
       activeEvents,
     })
   }
@@ -88,12 +102,15 @@ export function summarize(model: SimulationModel): SimulationSummary {
   const finish = states.find(s => s.completed >= model.subject.count)
   const baselineFinish = baseline.find(s => s.completed >= model.subject.count)
   const totalCompleted = states.at(-1)?.completed ?? 0
+  const peakQueue = Math.max(0, ...states.map(s => s.queue))
+  const totalWait = states.reduce((sum, s) => sum + s.queue, 0)
   return {
     completionMinute: finish?.minute ?? model.durationMinutes,
     baselineCompletionMinute: baselineFinish?.minute ?? model.durationMinutes,
-    peakQueue: Math.max(0, ...states.map(s => s.queue)),
+    peakQueue,
     totalCompleted,
     completionPercent: Math.min(100, Math.round(totalCompleted / Math.max(1, model.subject.count) * 100)),
     maxUtilization: Math.max(0, ...states.map(s => s.utilization)),
+    averageWaitMinutes: totalCompleted > 0 ? Math.round((totalWait / totalCompleted) * 10) / 10 : 0,
   }
 }
