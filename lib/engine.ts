@@ -47,21 +47,52 @@ function firstMatch(text: string, patterns: RegExp[], fallback: number) {
 }
 
 function findSubject(text: string) {
-  const match = text.match(/(\d[\d,]*)\s*(?:people|users|customers|students|attendees|orders|tasks|items|units|tickets|requests|visitors|products|packages|deliveries|jobs|records)/i)
+  const match = text.match(/(\d[\d,]*)\s*(?:people|users|customers|students|attendees|orders|tasks|items|units|tickets|requests|visitors|products|packages|deliveries|jobs|records|patients|calls|cases|files|applications|transactions|guests|passengers|vehicles)/i)
   if (match) {
     const word = match[0].match(/\d[\d,]*\s+([a-z][a-z-]*)/i)?.[1]
     if (word) return singular(word)
   }
-  const fallback = text.match(/(?:process|serve|handle|build|complete|deliver|produce)\s+(?:around\s+|about\s+)?\d[\d,]*\s+([a-z][a-z-]*)/i)?.[1]
+  const fallback = text.match(/(?:process|serve|handle|build|complete|deliver|produce|inspect|review|pack|ship)\s+(?:around\s+|about\s+|approximately\s+|roughly\s+)?\d[\d,]*\s+([a-z][a-z-]*)/i)?.[1]
   return fallback ? singular(fallback) : 'work'
 }
 
 function findResource(text: string) {
-  const known = text.match(/\d[\d,]*\s+(organizers?|staff|workers?|developers?|engineers?|servers?|machines?|counters?|desks?|stations?|cashiers?|agents?|vehicles?|drivers?|rooms?|printers?|lanes?|teams?|resources?|operators?|reviewers?|support staff)/i)?.[1]
+  const known = text.match(/\d[\d,]*\s+(organizers?|staff|workers?|developers?|engineers?|servers?|machines?|counters?|desks?|stations?|cashiers?|agents?|vehicles?|drivers?|rooms?|printers?|lanes?|teams?|resources?|operators?|reviewers?|support staff|inspectors?|technicians?|dispatchers?|clerks?|nurses?|doctors?)/i)?.[1]
   if (known) return singular(nice(known))
-  const withResource = text.match(/(?:with|have|using|from)\s+\d[\d,]*\s+([a-z][a-z-]*)/i)?.[1]
-  if (withResource && !/people|users|customers|students|attendees|orders|tasks|items|units|work/i.test(withResource)) return singular(withResource)
+  const withResource = text.match(/(?:with|have|using|from|by)\s+\d[\d,]*\s+([a-z][a-z-]*)/i)?.[1]
+  if (withResource && !/people|users|customers|students|attendees|orders|tasks|items|units|work|days?|hours?|minutes?/i.test(withResource)) return singular(withResource)
   return 'resource'
+}
+
+function parseDuration(text: string) {
+  const weeks = text.match(/(\d+(?:\.\d+)?)\s*(?:weeks?|week)/i)
+  const days = text.match(/(\d+(?:\.\d+)?)\s*(?:days?|day)/i)
+  const hours = text.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr)/i)
+  const minutes = text.match(/(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|min)/i)
+  const raw = weeks ? Number(weeks[1]) * 10080 : days ? Number(days[1]) * 1440 : hours ? Number(hours[1]) * 60 : minutes ? Number(minutes[1]) : 120
+  return Math.min(10080, Math.max(15, Math.round(raw)))
+}
+
+function parseRate(text: string) {
+  const match = text.match(/(\d+(?:\.\d+)?)\s*(?:per|\/|each)\s*(?:minute|min|hour|hr|day)/i)
+  if (!match) return 2
+  const value = Math.max(0.01, Number(match[1]))
+  if (/day/i.test(match[0])) return value / 1440
+  if (/hour|hr/i.test(match[0])) return value / 60
+  return value
+}
+
+function parseLoss(text: string, durationMinutes: number) {
+  const lossMatch = text.match(/(?:loses?|lose|losing|leaves?|leaving|unavailable|removed|offline|fails?|failure|down|drops?|breaks?|absent)/i)
+  if (!lossMatch) return { lossAt: null, lossAmount: 0 }
+  const amount = firstMatch(text, [/(?:loses?|lose|losing|remove|removes?|offline|fails?|drops?|breaks?)\s+(\d[\d,]*)/i], 1)
+  const time = text.match(/(?:at|after|in)\s+(\d+(?:\.\d+)?)\s*(minutes?|mins?|hours?|hrs?|days?)/i)
+  let lossAt = Math.round(durationMinutes / 2)
+  if (time) {
+    const n = Number(time[1])
+    lossAt = /day/i.test(time[2]) ? n * 1440 : /hour|hr/i.test(time[2]) ? n * 60 : n
+  }
+  return { lossAt: Math.max(1, Math.min(durationMinutes, Math.round(lossAt))), lossAmount: Math.max(1, amount) }
 }
 
 export function parseScenario(text: string): Model {
@@ -69,24 +100,18 @@ export function parseScenario(text: string): Model {
   const subject = findSubject(input)
   const resource = findResource(input)
   const subjectCount = firstMatch(input, [
-    /(\d[\d,]*)\s*(?:people|users|customers|students|attendees|orders|tasks|items|units|tickets|requests|visitors|products|packages|deliveries|jobs|records)/i,
-    /(?:around|about|approximately|roughly|total(?: of)?|need|handle|process|serve)\s+(\d[\d,]*)/i,
+    /(\d[\d,]*)\s*(?:people|users|customers|students|attendees|orders|tasks|items|units|tickets|requests|visitors|products|packages|deliveries|jobs|records|patients|calls|cases|files|applications|transactions|guests|passengers|vehicles)/i,
+    /(?:around|about|approximately|roughly|total(?: of)?|need|handle|process|serve|manage)\s+(\d[\d,]*)/i,
   ], 100)
   const resourceCount = firstMatch(input, [
-    /(\d[\d,]*)\s+(?:organizers?|staff|workers?|developers?|engineers?|servers?|machines?|counters?|desks?|stations?|cashiers?|agents?|vehicles?|drivers?|rooms?|printers?|lanes?|teams?|resources?|operators?|reviewers?|support staff)/i,
+    /(\d[\d,]*)\s+(?:organizers?|staff|workers?|developers?|engineers?|servers?|machines?|counters?|desks?|stations?|cashiers?|agents?|vehicles?|drivers?|rooms?|printers?|lanes?|teams?|resources?|operators?|reviewers?|support staff|inspectors?|technicians?|dispatchers?|clerks?|nurses?|doctors?)/i,
     /(?:with|have|using)\s+(\d[\d,]*)/i,
   ], 2)
-  const hours = input.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr)/i)
-  const days = input.match(/(\d+(?:\.\d+)?)\s*(?:days?|day)/i)
-  const minutes = input.match(/(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|min)/i)
-  const durationMinutes = Math.max(15, Math.round(hours ? Number(hours[1]) * 60 : days ? Number(days[1]) * 1440 : minutes ? Number(minutes[1]) : 120))
-  const rateMatch = input.match(/(\d+(?:\.\d+)?)\s*(?:per|\/|each)\s*(?:minute|min|hour|hr|day)/i)
-  const capacityPerResource = rateMatch ? Math.max(0.25, Number(rateMatch[1]) * (/hour|hr/i.test(rateMatch[0]) ? 1 / 60 : /day/i.test(rateMatch[0]) ? 1 / 1440 : 1)) : 2
-  const lossMatch = input.match(/(?:loses?|lose|losing|leaves?|leaving|unavailable|removed|offline|fails?|failure|down|drops?)/i)
-  const lossAmount = firstMatch(input, [/(?:loses?|lose|losing|remove|removes?|offline|fails?|drops?)\s+(\d[\d,]*)/i], lossMatch ? 1 : 0)
-  const lossAt = lossMatch ? Math.round(durationMinutes / 2) : null
-  const profile = /(?:rush|surge|peak|busy|most|70%|front[- ]loaded|early|first\s+(?:quarter|25|third))/i.test(input) ? 'front-loaded' : 'steady'
-  return { subject, subjectLabel: nice(subject || 'work'), subjectCount, resource, resourceLabel: nice(resource || 'resource'), resourceCount, capacityPerResource, durationMinutes, lossAt, lossAmount, lossTarget: lossMatch ? resource : null, profile }
+  const durationMinutes = parseDuration(input)
+  const rate = parseRate(input)
+  const { lossAt, lossAmount } = parseLoss(input, durationMinutes)
+  const profile = /(?:rush|surge|peak|busy|most|front[- ]loaded|opening wave|early|first\s+(?:quarter|25|third))/i.test(input) ? 'front-loaded' : 'steady'
+  return { subject, subjectLabel: nice(subject || 'work'), subjectCount, resource, resourceLabel: nice(resource || 'resource'), resourceCount, capacityPerResource: Math.max(0.01, Math.round(rate * 100) / 100), durationMinutes, lossAt, lossAmount, lossTarget: lossAt === null ? null : resource, profile }
 }
 
 function arrivalsAt(model: Model, minute: number) {
@@ -122,7 +147,7 @@ export function simulate(model: Model, applyEvents = true): State[] {
     queue = available - completedNow
     completed += completedNow
     const utilization = capacity === 0 ? (arrivalsNow > 0 ? 100 : 0) : Math.min(100, Math.round((Math.min(available, capacity) / capacity) * 100))
-    states.push({ minute, resources, capacityPerMinute: Math.round(capacity * 100) / 100, arrivals: arrivalsAt(model, minute), completed: Math.round(completed * 100) / 100, queue: Math.round(queue * 100) / 100, utilization, bottleneck: queue > 0 ? model.resourceLabel : 'Demand' })
+    states.push({ minute, resources, capacityPerMinute: Math.round(capacity * 100) / 100, arrivals: arrivalsAt(model, minute), completed: Math.min(model.subjectCount, Math.round(completed * 100) / 100), queue: Math.round(queue * 100) / 100, utilization, bottleneck: queue > 0 ? model.resourceLabel : 'Demand' })
   }
   return states
 }
@@ -138,5 +163,5 @@ export function summarize(model: Model): Summary {
   const completionMinute = finished?.minute ?? model.durationMinutes
   const baselineCompletionMinute = baselineFinished?.minute ?? model.durationMinutes
   const averageWaitMinutes = totalCompleted === 0 ? 0 : Math.round((peakQueue / Math.max(1, totalCompleted)) * 10) / 10
-  return { completionMinute, peakQueue, totalCompleted, averageWaitMinutes, baselineCompletionMinute, maxUtilization, completionPercent: Math.min(100, Math.round((totalCompleted / Math.max(1, model.subjectCount)) * 100)) }
+  return { completionMinute, peakQueue, totalCompleted, averageWaitMinutes, baselineCompletionMinute, maxUtilization, completionPercent: Math.min(100, Math.round(totalCompleted / Math.max(1, model.subjectCount) * 100)) }
 }
