@@ -80,17 +80,23 @@ function parseDuration(text: string) {
 }
 
 function parseRate(text: string) {
-  const match = text.match(/(\d+(?:\.\d+)?)\s*(?:per|\/|each)\s*(minute|min|hour|hr|day)/i)
-  if (!match) return 2
-  const value = Math.max(0.01, Number(match[1]))
-  return /day/i.test(match[2]) ? value / 1440 : /hour|hr/i.test(match[2]) ? value / 60 : value
+  const direct = text.match(/(\d+(?:\.\d+)?)\s*(?:per|\/|each)\s*(minute|min|hour|hr|day)/i)
+  if (direct) {
+    const value = Math.max(0.01, Number(direct[1]))
+    return /day/i.test(direct[2]) ? value / 1440 : /hour|hr/i.test(direct[2]) ? value / 60 : value
+  }
+  const every = text.match(/(?:one|1|a)\s+(?:[a-z][a-z-]*\s+)?(?:every)\s+(\d+(?:\.\d+)?)\s*(minutes?|mins?|min|hours?|hrs?|hr|days?)/i)
+  if (every) return 1 / Math.max(1, toMinutes(Number(every[1]), every[2]))
+  const compactEvery = text.match(/every\s+(\d+(?:\.\d+)?)\s*(minutes?|mins?|min|hours?|hrs?|hr|days?)/i)
+  if (compactEvery) return 1 / Math.max(1, toMinutes(Number(compactEvery[1]), compactEvery[2]))
+  return 2
 }
 
 function parseLoss(text: string, durationMinutes: number, resourceCount: number) {
   const clause = text.match(/(?:loses?|lose|losing|leaves?|leaving|unavailable|removed|offline|fails?|failure|down|drops?|breaks?|stop working|stops working)/i)
   if (!clause) return { lossAt: null, lossAmount: 0 }
   const before = text.slice(0, clause.index ?? 0)
-  const explicitAmount = before.match(/(\d[\d,]*)\s+[a-z][a-z-]*\s*$/i)?.[1]
+  const explicitAmount = before.match(new RegExp(`(\\d[\\d,]*)\\s+(?:${resourceWords.source})`, 'i'))?.[1]
   const amount = explicitAmount ? clean(explicitAmount) : firstNumber(text, [/(?:loses?|lose|losing|remove|removes?|offline|fails?|drops?|breaks?)\s+(\d[\d,]*)/i], 1)
   const time = text.match(/(?:at|after|in)\s+(\d+(?:\.\d+)?)\s*(weeks?|days?|hours?|hrs?|minutes?|mins?|min)/i)
   const rawTime = time ? toMinutes(Number(time[1]), time[2]) : durationMinutes / 2
@@ -100,10 +106,7 @@ function parseLoss(text: string, durationMinutes: number, resourceCount: number)
 function applyWhatIf(text: string, subjectCount: number, resourceCount: number, rate: number, durationMinutes: number) {
   const change = text.match(/(?:change|what\s*if|instead|then)\s*:\s*(.+)$/i)?.[1] ?? ''
   if (!change) return { subjectCount, resourceCount, rate, durationMinutes, changeApplied: null as string | null }
-  let nextSubject = subjectCount
-  let nextResources = resourceCount
-  let nextRate = rate
-  let nextDuration = durationMinutes
+  let nextSubject = subjectCount, nextResources = resourceCount, nextRate = rate, nextDuration = durationMinutes
   let changeApplied: string | null = null
 
   const percent = change.match(/(increase|decrease|raise|reduce|drop)\s+(?:demand|volume|workload|load|throughput|capacity)\s+by\s+(\d+(?:\.\d+)?)\s*%/i)
@@ -145,7 +148,7 @@ export function parseScenario(text: string): Model {
   const { lossAt, lossAmount } = parseLoss(input, changed.durationMinutes, changed.resourceCount)
   const profile = /(?:rush|surge|peak|busy|most|front[- ]loaded|opening wave|early|first\s+(?:quarter|25|third))/i.test(input) ? 'front-loaded' : 'steady'
   const assumptions: string[] = []
-  if (!/\d+(?:\.\d+)?\s*(?:per|\/|each)\s*(?:minute|min|hour|hr|day)/i.test(input)) assumptions.push(`No throughput rate was stated; MIRROR uses a default of 2 ${nice(subject)}/min/resource.`)
+  if (!/\d+(?:\.\d+)?\s*(?:per|\/|each)\s*(?:minute|min|hour|hr|day)/i.test(input) && !/(?:one|1|a)\s+(?:[a-z][a-z-]*\s+)?every\s+\d+/i.test(input)) assumptions.push(`No throughput rate was stated; MIRROR uses a default of 2 ${nice(subject)}/min/resource.`)
   if (profile === 'front-loaded') assumptions.push('Demand is modeled as front-loaded because an early rush was indicated.')
   else assumptions.push('Demand is distributed steadily across the modeled window.')
   if (changed.changeApplied) assumptions.push(`What-if applied deterministically: ${changed.changeApplied}.`)
