@@ -11,6 +11,8 @@ export type Model = {
   lossAmount: number
   lossTarget: string | null
   profile: 'front-loaded' | 'steady'
+  assumptions: string[]
+  limitations: string[]
 }
 
 export type State = {
@@ -36,9 +38,11 @@ export type Summary = {
 
 const clean = (value: string) => Number(value.replace(/,/g, ''))
 const singular = (value: string) => value.replace(/ies$/i, 'y').replace(/s$/i, '')
-const nice = (value: string) => value.replace(/[-_]/g, ' ').trim()
+const nice = (value: string) => value.replace(/[-_]/g, ' ').replace(/\s+/g, ' ').trim()
+const subjectWords = /people|users|customers|students|attendees|orders|tasks|items|units|tickets|requests|visitors|products|packages|deliveries|jobs|records|patients|calls|cases|files|applications|transactions|guests|passengers|vehicles|appointments|messages|claims|documents|containers/i
+const resourceWords = /organizers?|staff|workers?|developers?|engineers?|servers?|machines?|counters?|desks?|stations?|cashiers?|agents?|vehicles?|drivers?|rooms?|printers?|lanes?|teams?|resources?|operators?|reviewers?|inspectors?|technicians?|dispatchers?|clerks?|nurses?|doctors?|riders?|pickers?|packers?|seats?|registers?/i
 
-function firstMatch(text: string, patterns: RegExp[], fallback: number) {
+function firstNumber(text: string, patterns: RegExp[], fallback: number) {
   for (const pattern of patterns) {
     const match = text.match(pattern)
     if (match) return Math.max(0, clean(match[1]))
@@ -46,72 +50,106 @@ function firstMatch(text: string, patterns: RegExp[], fallback: number) {
   return fallback
 }
 
+function toMinutes(value: number, unit: string) {
+  if (/week/i.test(unit)) return value * 10080
+  if (/day/i.test(unit)) return value * 1440
+  if (/hour|hr/i.test(unit)) return value * 60
+  return value
+}
+
 function findSubject(text: string) {
-  const match = text.match(/(\d[\d,]*)\s*(?:people|users|customers|students|attendees|orders|tasks|items|units|tickets|requests|visitors|products|packages|deliveries|jobs|records|patients|calls|cases|files|applications|transactions|guests|passengers|vehicles)/i)
-  if (match) {
-    const word = match[0].match(/\d[\d,]*\s+([a-z][a-z-]*)/i)?.[1]
-    if (word) return singular(word)
-  }
+  const match = text.match(new RegExp(`(\\d[\\d,]*)\\s*(${subjectWords.source})`, 'i'))
+  if (match) return singular(match[2])
   const fallback = text.match(/(?:process|serve|handle|build|complete|deliver|produce|inspect|review|pack|ship)\s+(?:around\s+|about\s+|approximately\s+|roughly\s+)?\d[\d,]*\s+([a-z][a-z-]*)/i)?.[1]
   return fallback ? singular(fallback) : 'work'
 }
 
 function findResource(text: string) {
-  const known = text.match(/\d[\d,]*\s+(organizers?|staff|workers?|developers?|engineers?|servers?|machines?|counters?|desks?|stations?|cashiers?|agents?|vehicles?|drivers?|rooms?|printers?|lanes?|teams?|resources?|operators?|reviewers?|support staff|inspectors?|technicians?|dispatchers?|clerks?|nurses?|doctors?)/i)?.[1]
-  if (known) return singular(nice(known))
-  const withResource = text.match(/(?:with|have|using|from|by)\s+\d[\d,]*\s+([a-z][a-z-]*)/i)?.[1]
-  if (withResource && !/people|users|customers|students|attendees|orders|tasks|items|units|work|days?|hours?|minutes?/i.test(withResource)) return singular(withResource)
+  const match = text.match(new RegExp(`\\d[\\d,]*\\s+(${resourceWords.source})`, 'i'))?.[1]
+  if (match) return singular(nice(match))
+  const generic = text.match(/(?:with|have|using|from|by)\s+\d[\d,]*\s+([a-z][a-z-]*)/i)?.[1]
+  if (generic && !subjectWords.test(generic) && !/days?|hours?|minutes?/i.test(generic)) return singular(generic)
   return 'resource'
 }
 
 function parseDuration(text: string) {
-  const weeks = text.match(/(\d+(?:\.\d+)?)\s*(?:weeks?|week)/i)
-  const days = text.match(/(\d+(?:\.\d+)?)\s*(?:days?|day)/i)
-  const hours = text.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr)/i)
-  const minutes = text.match(/(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|min)/i)
-  const raw = weeks ? Number(weeks[1]) * 10080 : days ? Number(days[1]) * 1440 : hours ? Number(hours[1]) * 60 : minutes ? Number(minutes[1]) : 120
-  return Math.min(10080, Math.max(15, Math.round(raw)))
+  const matches = [...text.matchAll(/(\d+(?:\.\d+)?)\s*(weeks?|days?|hours?|hrs?|minutes?|mins?|min)/gi)]
+  if (!matches.length) return 120
+  const primary = matches.find(m => /(?:over|for|within|across|during)\s*$/i.test(text.slice(Math.max(0, (m.index ?? 0) - 8), m.index ?? 0))) ?? matches[0]
+  return Math.min(10080, Math.max(15, Math.round(toMinutes(Number(primary[1]), primary[2]))))
 }
 
 function parseRate(text: string) {
-  const match = text.match(/(\d+(?:\.\d+)?)\s*(?:per|\/|each)\s*(?:minute|min|hour|hr|day)/i)
+  const match = text.match(/(\d+(?:\.\d+)?)\s*(?:per|\/|each)\s*(minute|min|hour|hr|day)/i)
   if (!match) return 2
   const value = Math.max(0.01, Number(match[1]))
-  if (/day/i.test(match[0])) return value / 1440
-  if (/hour|hr/i.test(match[0])) return value / 60
-  return value
+  return /day/i.test(match[2]) ? value / 1440 : /hour|hr/i.test(match[2]) ? value / 60 : value
 }
 
-function parseLoss(text: string, durationMinutes: number) {
-  const lossMatch = text.match(/(?:loses?|lose|losing|leaves?|leaving|unavailable|removed|offline|fails?|failure|down|drops?|breaks?|absent)/i)
-  if (!lossMatch) return { lossAt: null, lossAmount: 0 }
-  const amount = firstMatch(text, [/(?:loses?|lose|losing|remove|removes?|offline|fails?|drops?|breaks?)\s+(\d[\d,]*)/i], 1)
-  const time = text.match(/(?:at|after|in)\s+(\d+(?:\.\d+)?)\s*(minutes?|mins?|hours?|hrs?|days?)/i)
-  let lossAt = Math.round(durationMinutes / 2)
-  if (time) {
-    const n = Number(time[1])
-    lossAt = /day/i.test(time[2]) ? n * 1440 : /hour|hr/i.test(time[2]) ? n * 60 : n
+function parseLoss(text: string, durationMinutes: number, resourceCount: number) {
+  const clause = text.match(/(?:loses?|lose|losing|leaves?|leaving|unavailable|removed|offline|fails?|failure|down|drops?|breaks?|stop working|stops working)/i)
+  if (!clause) return { lossAt: null, lossAmount: 0 }
+  const before = text.slice(0, clause.index ?? 0)
+  const explicitAmount = before.match(/(\d[\d,]*)\s+[a-z][a-z-]*\s*$/i)?.[1]
+  const amount = explicitAmount ? clean(explicitAmount) : firstNumber(text, [/(?:loses?|lose|losing|remove|removes?|offline|fails?|drops?|breaks?)\s+(\d[\d,]*)/i], 1)
+  const time = text.match(/(?:at|after|in)\s+(\d+(?:\.\d+)?)\s*(weeks?|days?|hours?|hrs?|minutes?|mins?|min)/i)
+  const rawTime = time ? toMinutes(Number(time[1]), time[2]) : durationMinutes / 2
+  return { lossAt: Math.max(1, Math.min(durationMinutes, Math.round(rawTime))), lossAmount: Math.max(1, Math.min(resourceCount, amount || 1)) }
+}
+
+function applyWhatIf(text: string, subjectCount: number, resourceCount: number, rate: number, durationMinutes: number) {
+  const change = text.match(/(?:change|what\s*if|instead|then)\s*:\s*(.+)$/i)?.[1] ?? ''
+  if (!change) return { subjectCount, resourceCount, rate, durationMinutes, changeApplied: null as string | null }
+  let nextSubject = subjectCount
+  let nextResources = resourceCount
+  let nextRate = rate
+  let nextDuration = durationMinutes
+  let changeApplied: string | null = null
+
+  const percent = change.match(/(increase|decrease|raise|reduce|drop)\s+(?:demand|volume|workload|load|throughput|capacity)\s+by\s+(\d+(?:\.\d+)?)\s*%/i)
+  if (percent) {
+    const factor = 1 + (/increase|raise/i.test(percent[1]) ? 1 : -1) * Number(percent[2]) / 100
+    if (/throughput|capacity/i.test(percent[0])) nextRate = Math.max(0.01, rate * factor)
+    else nextSubject = Math.max(0, Math.round(subjectCount * factor))
+    changeApplied = percent[0]
   }
-  return { lossAt: Math.max(1, Math.min(durationMinutes, Math.round(lossAt))), lossAmount: Math.max(1, amount) }
+
+  const absolute = change.match(/(add|remove|increase|decrease|reduce|drop)\s+(\d[\d,]*)\s+([a-z][a-z-]*)/i)
+  if (absolute && !percent) {
+    const amount = clean(absolute[2])
+    const noun = absolute[3]
+    const direction = /add|increase/i.test(absolute[1]) ? 1 : -1
+    if (subjectWords.test(noun)) nextSubject = Math.max(0, subjectCount + direction * amount)
+    else if (resourceWords.test(noun)) nextResources = Math.max(0, resourceCount + direction * amount)
+    changeApplied = absolute[0]
+  }
+
+  const duration = change.match(/(extend|increase|reduce|shorten|decrease)\s+(?:the\s+)?(?:day|duration|window|time)\s+(?:by\s+)?(\d+(?:\.\d+)?)\s*(weeks?|days?|hours?|hrs?|minutes?|mins?|min)/i)
+  if (duration) {
+    const amount = toMinutes(Number(duration[2]), duration[3])
+    nextDuration = Math.min(10080, Math.max(15, Math.round(nextDuration + (/extend|increase/i.test(duration[1]) ? amount : -amount))))
+    changeApplied = duration[0]
+  }
+  return { subjectCount: nextSubject, resourceCount: nextResources, rate: nextRate, durationMinutes: nextDuration, changeApplied }
 }
 
 export function parseScenario(text: string): Model {
   const input = text.trim()
   const subject = findSubject(input)
   const resource = findResource(input)
-  const subjectCount = firstMatch(input, [
-    /(\d[\d,]*)\s*(?:people|users|customers|students|attendees|orders|tasks|items|units|tickets|requests|visitors|products|packages|deliveries|jobs|records|patients|calls|cases|files|applications|transactions|guests|passengers|vehicles)/i,
-    /(?:around|about|approximately|roughly|total(?: of)?|need|handle|process|serve|manage)\s+(\d[\d,]*)/i,
-  ], 100)
-  const resourceCount = firstMatch(input, [
-    /(\d[\d,]*)\s+(?:organizers?|staff|workers?|developers?|engineers?|servers?|machines?|counters?|desks?|stations?|cashiers?|agents?|vehicles?|drivers?|rooms?|printers?|lanes?|teams?|resources?|operators?|reviewers?|support staff|inspectors?|technicians?|dispatchers?|clerks?|nurses?|doctors?)/i,
-    /(?:with|have|using)\s+(\d[\d,]*)/i,
-  ], 2)
-  const durationMinutes = parseDuration(input)
-  const rate = parseRate(input)
-  const { lossAt, lossAmount } = parseLoss(input, durationMinutes)
+  const baseSubjectCount = firstNumber(input, [new RegExp(`(\\d[\\d,]*)\\s*(?:${subjectWords.source})`, 'i'), /(?:around|about|approximately|roughly|total(?: of)?|need|handle|process|serve|manage)\s+(\d[\d,]*)/i], 100)
+  const baseResourceCount = firstNumber(input, [new RegExp(`(\\d[\\d,]*)\\s+(?:${resourceWords.source})`, 'i'), /(?:with|have|using)\s+(\d[\d,]*)/i], 2)
+  const baseDuration = parseDuration(input)
+  const baseRate = parseRate(input)
+  const changed = applyWhatIf(input, baseSubjectCount, baseResourceCount, baseRate, baseDuration)
+  const { lossAt, lossAmount } = parseLoss(input, changed.durationMinutes, changed.resourceCount)
   const profile = /(?:rush|surge|peak|busy|most|front[- ]loaded|opening wave|early|first\s+(?:quarter|25|third))/i.test(input) ? 'front-loaded' : 'steady'
-  return { subject, subjectLabel: nice(subject || 'work'), subjectCount, resource, resourceLabel: nice(resource || 'resource'), resourceCount, capacityPerResource: Math.max(0.01, Math.round(rate * 100) / 100), durationMinutes, lossAt, lossAmount, lossTarget: lossAt === null ? null : resource, profile }
+  const assumptions: string[] = []
+  if (!/\d+(?:\.\d+)?\s*(?:per|\/|each)\s*(?:minute|min|hour|hr|day)/i.test(input)) assumptions.push(`No throughput rate was stated; MIRROR uses a default of 2 ${nice(subject)}/min/resource.`)
+  if (profile === 'front-loaded') assumptions.push('Demand is modeled as front-loaded because an early rush was indicated.')
+  else assumptions.push('Demand is distributed steadily across the modeled window.')
+  if (changed.changeApplied) assumptions.push(`What-if applied deterministically: ${changed.changeApplied}.`)
+  return { subject, subjectLabel: nice(subject || 'work'), subjectCount: changed.subjectCount, resource, resourceLabel: nice(resource || 'resource'), resourceCount: changed.resourceCount, capacityPerResource: Math.max(0.01, Math.round(changed.rate * 100) / 100), durationMinutes: changed.durationMinutes, lossAt, lossAmount, lossTarget: lossAt === null ? null : resource, profile, assumptions, limitations: ['Deterministic calculation only: results follow the quantities, rates, timing and assumptions represented in the model. Real systems can differ when important variables are not modeled.'] }
 }
 
 function arrivalsAt(model: Model, minute: number) {
@@ -136,8 +174,7 @@ export function step(model: Model, minute: number, applyEvents = true): State {
 
 export function simulate(model: Model, applyEvents = true): State[] {
   const states: State[] = []
-  let queue = 0
-  let completed = 0
+  let queue = 0, completed = 0
   for (let minute = 1; minute <= model.durationMinutes; minute += 1) {
     const arrivalsNow = arrivalsAt(model, minute) - arrivalsAt(model, minute - 1)
     const resources = activeResources(model, minute, applyEvents)
@@ -162,6 +199,7 @@ export function summarize(model: Model): Summary {
   const maxUtilization = Math.max(0, ...states.map(s => s.utilization))
   const completionMinute = finished?.minute ?? model.durationMinutes
   const baselineCompletionMinute = baselineFinished?.minute ?? model.durationMinutes
-  const averageWaitMinutes = totalCompleted === 0 ? 0 : Math.round((peakQueue / Math.max(1, totalCompleted)) * 10) / 10
+  const totalQueueWork = states.reduce((sum, state) => sum + state.queue, 0)
+  const averageWaitMinutes = totalCompleted === 0 ? 0 : Math.round((totalQueueWork / totalCompleted) * 10) / 10
   return { completionMinute, peakQueue, totalCompleted, averageWaitMinutes, baselineCompletionMinute, maxUtilization, completionPercent: Math.min(100, Math.round(totalCompleted / Math.max(1, model.subjectCount) * 100)) }
 }
